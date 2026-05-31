@@ -4,11 +4,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <Authors>marlonjd</Authors>
-    <Company>MarlonJD</Company>
+    <Authors>Burak Karahan</Authors>
+    <Company>Burak Karahan</Company>
+    <Copyright>Copyright (C) 2026 Burak Karahan</Copyright>
     <RepositoryUrl>https://github.com/MarlonJD/windows-updater-dotnet</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>LGPL-3.0-or-later</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>windows updater delta manifest release</PackageTags>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>

@@ -24,6 +24,12 @@ ready-made product updater.
 - `MarlonJD.WindowsUpdater.Release`
 - `MarlonJD.WindowsUpdater.Cli` as the `windows-updater-release` .NET tool
 
+## License
+
+Copyright (C) 2026 Burak Karahan.
+
+This project is licensed under `LGPL-3.0-or-later`.
+
 ## Checks
 
 ```sh
