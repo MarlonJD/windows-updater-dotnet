@@ -69,4 +69,9 @@ public static class UpdateFileClassifier
             || relativePath.StartsWith("Resources/", StringComparison.OrdinalIgnoreCase)
             || relativePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase);
     }
+
+    public static bool IsSignable(UpdateFileKind kind)
+    {
+        return kind is UpdateFileKind.Executable or UpdateFileKind.DynamicLibrary;
+    }
 }

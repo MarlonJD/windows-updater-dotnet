@@ -49,6 +49,26 @@ public static class ManifestJson
         return JsonSerializer.SerializeToUtf8Bytes(unsigned, CompactOptions);
     }
 
+    public static byte[] CanonicalBytes(ReleaseMetadata metadata)
+    {
+        var unsigned = metadata with
+        {
+            Signature = null,
+            Deltas = metadata.Deltas
+                .OrderBy(delta => delta.BaseBuild)
+                .ThenBy(delta => delta.TargetBuild)
+                .ToArray()
+        };
+
+        return JsonSerializer.SerializeToUtf8Bytes(unsigned, CompactOptions);
+    }
+
+    public static byte[] CanonicalBytes(LatestChannelManifest manifest)
+    {
+        var unsigned = manifest with { Signature = null };
+        return JsonSerializer.SerializeToUtf8Bytes(unsigned, CompactOptions);
+    }
+
     public static async Task<T> ReadAsync<T>(string path, CancellationToken cancellationToken = default)
     {
         await using var stream = File.OpenRead(path);

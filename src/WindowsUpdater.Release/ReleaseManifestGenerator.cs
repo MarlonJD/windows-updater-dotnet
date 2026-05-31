@@ -73,6 +73,16 @@ public sealed class ReleaseManifestGenerator
             }
         }
 
+        if (!manifest.Files.Any(file => file.Kind == UpdateFileKind.DependencyManifest))
+        {
+            errors.Add("Release manifest must include at least one .deps.json file.");
+        }
+
+        if (!manifest.Files.Any(file => file.Kind == UpdateFileKind.RuntimeConfig))
+        {
+            errors.Add("Release manifest must include at least one .runtimeconfig.json file.");
+        }
+
         return errors.Count == 0
             ? ReleaseManifestValidationResult.Valid
             : new ReleaseManifestValidationResult(false, errors);
@@ -142,6 +152,81 @@ public sealed class ReleaseManifestGenerator
             operations.OrderBy(operation => operation.Path, StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
+    public async Task<FullArchiveMetadata> GenerateFullArchiveAsync(
+        string targetReleaseDirectory,
+        string outputDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Directory.Exists(targetReleaseDirectory))
+        {
+            throw new DirectoryNotFoundException(targetReleaseDirectory);
+        }
+
+        Directory.CreateDirectory(outputDirectory);
+        var tempPath = Path.Combine(outputDirectory, $"full-{Guid.NewGuid():N}.zip");
+        ZipFile.CreateFromDirectory(
+            targetReleaseDirectory,
+            tempPath,
+            CompressionLevel.SmallestSize,
+            includeBaseDirectory: false);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var hash = FileHash.Sha256File(tempPath);
+        var archivePath = ContentAddressedPath("archives", hash, ".zip");
+        var outputPath = Path.Combine(outputDirectory, archivePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? outputDirectory);
+
+        if (File.Exists(outputPath))
+        {
+            File.Delete(tempPath);
+        }
+        else
+        {
+            File.Move(tempPath, outputPath);
+        }
+
+        var output = new FileInfo(outputPath);
+        await Task.CompletedTask;
+        return new FullArchiveMetadata(archivePath, "zip", hash, output.Length);
+    }
+
+    public ReleaseMetadata GenerateReleaseMetadata(
+        ReleaseManifest targetManifest,
+        FullArchiveMetadata fullArchive,
+        IReadOnlyList<DeltaManifest> deltas,
+        string commit,
+        string? changelogMarkdown = null,
+        DateTimeOffset? publishedAtUtc = null)
+    {
+        var releaseId = $"{targetManifest.Version}+{targetManifest.Build}";
+        return new ReleaseMetadata(
+            targetManifest.Product,
+            targetManifest.Channel,
+            targetManifest.Architecture,
+            targetManifest.Version,
+            targetManifest.Build,
+            releaseId,
+            commit,
+            "target-file-manifest.json",
+            ManifestSignatureService.ContentHash(targetManifest),
+            fullArchive,
+            deltas
+                .OrderBy(delta => delta.BaseBuild)
+                .Select(delta =>
+                {
+                    var path = $"delta-from-{delta.BaseBuild}-to-{delta.TargetBuild}.json";
+                    return new ReleaseDeltaMetadata(
+                        delta.BaseBuild,
+                        delta.TargetBuild,
+                        path,
+                        ManifestSignatureService.ContentHash(delta),
+                        EstimateJsonSize(delta));
+                })
+                .ToArray(),
+            changelogMarkdown,
+            publishedAtUtc);
+    }
+
     private static UpdateFileEntry CreateEntry(string root, string path, string publisher)
     {
         var relativePath = Path.GetRelativePath(root, path)
@@ -166,25 +251,47 @@ public sealed class ReleaseManifestGenerator
         CancellationToken cancellationToken)
     {
         var sourcePath = Path.Combine(targetReleaseDirectory, target.Path);
-        var payloadPath = $"payload/{target.Sha256}.gz";
-        var outputPath = Path.Combine(outputDirectory, payloadPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? outputDirectory);
+        Directory.CreateDirectory(outputDirectory);
+        var tempPath = Path.Combine(outputDirectory, $"payload-{Guid.NewGuid():N}.gz");
 
         await using (var source = File.OpenRead(sourcePath))
-        await using (var destination = File.Create(outputPath))
+        await using (var destination = File.Create(tempPath))
         await using (var gzip = new GZipStream(destination, CompressionLevel.SmallestSize))
         {
             await source.CopyToAsync(gzip, cancellationToken);
+        }
+
+        var compressedSha256 = FileHash.Sha256File(tempPath);
+        var payloadPath = ContentAddressedPath("payloads", compressedSha256, ".gz");
+        var outputPath = Path.Combine(outputDirectory, payloadPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? outputDirectory);
+        if (File.Exists(outputPath))
+        {
+            File.Delete(tempPath);
+        }
+        else
+        {
+            File.Move(tempPath, outputPath);
         }
 
         var output = new FileInfo(outputPath);
         return new CompressedPayloadMetadata(
             payloadPath,
             "gzip",
-            FileHash.Sha256File(outputPath),
+            compressedSha256,
             output.Length,
             target.Sha256,
             target.Size);
+    }
+
+    private static string ContentAddressedPath(string root, string sha256, string extension)
+    {
+        return $"{root}/{sha256[..2]}/{sha256.Substring(2, 2)}/{sha256}{extension}";
+    }
+
+    private static long EstimateJsonSize(DeltaManifest value)
+    {
+        return ManifestJson.CanonicalBytes(value).LongLength;
     }
 
     private static string? RuntimeGroupFor(UpdateFileKind kind, string relativePath)

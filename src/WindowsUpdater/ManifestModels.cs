@@ -36,6 +36,12 @@ public sealed record CompressedPayloadMetadata(
     string UncompressedSha256,
     long UncompressedSize);
 
+public sealed record FullArchiveMetadata(
+    string ArchivePath,
+    string Compression,
+    string Sha256,
+    long Size);
+
 public sealed record UpdateFileEntry(
     string Path,
     string Sha256,
@@ -74,4 +80,41 @@ public sealed record DeltaManifest(
     string TargetVersion,
     string TargetManifestHash,
     IReadOnlyList<DeltaOperation> Operations,
+    ManifestSignature? Signature = null);
+
+public sealed record ReleaseDeltaMetadata(
+    long BaseBuild,
+    long TargetBuild,
+    string Path,
+    string Sha256,
+    long Size);
+
+public sealed record ReleaseMetadata(
+    string Product,
+    string Channel,
+    string Architecture,
+    string Version,
+    long Build,
+    string ReleaseId,
+    string Commit,
+    string TargetManifestPath,
+    string TargetManifestSha256,
+    FullArchiveMetadata FullArchive,
+    IReadOnlyList<ReleaseDeltaMetadata> Deltas,
+    string? ChangelogMarkdown = null,
+    DateTimeOffset? PublishedAtUtc = null,
+    ManifestSignature? Signature = null);
+
+public sealed record LatestChannelManifest(
+    string Product,
+    string Channel,
+    string Architecture,
+    string Version,
+    long Build,
+    string ReleaseId,
+    string ReleaseManifestUrl,
+    string TargetManifestUrl,
+    long MinimumSupportedBuild,
+    bool Mandatory,
+    DateTimeOffset PublishedAtUtc,
     ManifestSignature? Signature = null);

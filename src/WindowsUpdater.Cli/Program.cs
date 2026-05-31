@@ -17,6 +17,7 @@ try
         "generate" => await GenerateAsync(arguments),
         "dry-run" => await DryRunAsync(arguments),
         "changelog" => GenerateChangelog(arguments),
+        "allocate" => await AllocateAsync(arguments),
         _ => Unknown(command)
     };
 }
@@ -54,9 +55,13 @@ static async Task<int> GenerateAsync(IReadOnlyDictionary<string, string> argumen
     }
 
     var outputDirectory = arguments["output-dir"];
+    var deltas = new List<DeltaManifest>();
     var manifestPath = Path.Combine(outputDirectory, "target-file-manifest.json");
     await ManifestJson.WriteAsync(manifestPath, manifest);
     Console.WriteLine(manifestPath);
+
+    var fullArchive = await generator.GenerateFullArchiveAsync(arguments["release-dir"], outputDirectory);
+    Console.WriteLine(Path.Combine(outputDirectory, fullArchive.ArchivePath));
 
     if (arguments.TryGetValue("base-manifest", out var baseManifestPath))
     {
@@ -69,8 +74,27 @@ static async Task<int> GenerateAsync(IReadOnlyDictionary<string, string> argumen
 
         var deltaPath = Path.Combine(outputDirectory, $"delta-from-{delta.BaseBuild}-to-{delta.TargetBuild}.json");
         await ManifestJson.WriteAsync(deltaPath, delta);
+        deltas.Add(delta);
         Console.WriteLine(deltaPath);
     }
+
+    var changelogMarkdown = arguments.TryGetValue("changelog", out var changelogPath) && File.Exists(changelogPath)
+        ? await File.ReadAllTextAsync(changelogPath)
+        : null;
+    var releaseMetadata = generator.GenerateReleaseMetadata(
+        manifest,
+        fullArchive,
+        deltas,
+        arguments.GetValueOrDefault("commit") ?? "unknown",
+        changelogMarkdown);
+    if (arguments.TryGetValue("key-id", out keyId) && arguments.TryGetValue("private-key", out privateKey))
+    {
+        releaseMetadata = signer.Sign(releaseMetadata, keyId, privateKey);
+    }
+
+    var releasePath = Path.Combine(outputDirectory, "release.json");
+    await ManifestJson.WriteAsync(releasePath, releaseMetadata);
+    Console.WriteLine(releasePath);
 
     return 0;
 }
@@ -121,6 +145,21 @@ static int GenerateChangelog(IReadOnlyDictionary<string, string> arguments)
     return 0;
 }
 
+static async Task<int> AllocateAsync(IReadOnlyDictionary<string, string> arguments)
+{
+    if (!Required(arguments, "state", "version"))
+    {
+        PrintUsage();
+        return 2;
+    }
+
+    var state = await ReleaseStateStore.ReadAsync(arguments["state"]);
+    var next = state.Allocate(arguments["version"]);
+    await ReleaseStateStore.WriteAsync(arguments["state"], next);
+    Console.WriteLine($"{arguments["version"]}+{next.LastBuildNumber}");
+    return 0;
+}
+
 static int Unknown(string command)
 {
     Console.Error.WriteLine($"Unknown command: {command}");
@@ -145,6 +184,7 @@ static void PrintUsage()
     Console.WriteLine("windows-updater-release generate --release-dir <path> --output-dir <path> --channel <name> --architecture <rid> --version <semver> --build <number> --publisher <subject>");
     Console.WriteLine("windows-updater-release dry-run --manifest <path> --bucket <name> --cloudfront <url> --platform windows --channel stable");
     Console.WriteLine("windows-updater-release changelog --version <semver> --commits \"feat: one|fix: two\"");
+    Console.WriteLine("windows-updater-release allocate --state release/desktop-release-state.json --version <semver>");
 }
 
 internal static class CliArguments

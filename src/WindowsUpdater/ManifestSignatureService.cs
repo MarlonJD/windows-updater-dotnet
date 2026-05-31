@@ -35,6 +35,18 @@ public sealed class ManifestSignatureService
         return request with { Signature = SignContent(content, keyId, privateKey) };
     }
 
+    public ReleaseMetadata Sign(ReleaseMetadata metadata, string keyId, string privateKey)
+    {
+        var content = ManifestJson.CanonicalBytes(metadata);
+        return metadata with { Signature = SignContent(content, keyId, privateKey) };
+    }
+
+    public LatestChannelManifest Sign(LatestChannelManifest manifest, string keyId, string privateKey)
+    {
+        var content = ManifestJson.CanonicalBytes(manifest);
+        return manifest with { Signature = SignContent(content, keyId, privateKey) };
+    }
+
     public bool Verify(ReleaseManifest manifest, IReadOnlyDictionary<string, string> publicKeys)
     {
         return manifest.Signature is not null
@@ -53,12 +65,34 @@ public sealed class ManifestSignatureService
             && VerifyContent(ManifestJson.CanonicalBytes(request), request.Signature, publicKeys);
     }
 
+    public bool Verify(ReleaseMetadata metadata, IReadOnlyDictionary<string, string> publicKeys)
+    {
+        return metadata.Signature is not null
+            && VerifyContent(ManifestJson.CanonicalBytes(metadata), metadata.Signature, publicKeys);
+    }
+
+    public bool Verify(LatestChannelManifest manifest, IReadOnlyDictionary<string, string> publicKeys)
+    {
+        return manifest.Signature is not null
+            && VerifyContent(ManifestJson.CanonicalBytes(manifest), manifest.Signature, publicKeys);
+    }
+
     public static string ContentHash(ReleaseManifest manifest)
     {
         return FileHash.Sha256Bytes(ManifestJson.CanonicalBytes(manifest));
     }
 
     public static string ContentHash(DeltaManifest manifest)
+    {
+        return FileHash.Sha256Bytes(ManifestJson.CanonicalBytes(manifest));
+    }
+
+    public static string ContentHash(ReleaseMetadata metadata)
+    {
+        return FileHash.Sha256Bytes(ManifestJson.CanonicalBytes(metadata));
+    }
+
+    public static string ContentHash(LatestChannelManifest manifest)
     {
         return FileHash.Sha256Bytes(ManifestJson.CanonicalBytes(manifest));
     }

@@ -108,6 +108,12 @@ Example:
 When releasing `1.1.0`, allocate the next build number and commit the updated
 state file with the release change:
 
+```sh
+windows-updater-release allocate \
+  --state release/windows-updater-release-state.json \
+  --version 1.1.0
+```
+
 ```json
 {
   "lastBuildNumber": 110,
@@ -268,13 +274,19 @@ The update directory contains:
 artifacts/1.1.0+110/update/
   target-file-manifest.json
   delta-from-100-to-110.json
-  payload/
-    <changed-file-sha256>.gz
+  payloads/
+    <prefix>/<compressed-payload-sha256>.gz
+  archives/
+    <prefix>/<full-archive-sha256>.zip
+  release.json
 ```
 
 Only files with changed hashes become `downloadFile` payloads. Unchanged files
 are represented as `copyFromBase`, and files removed from the target release are
-represented as `delete`.
+represented as `delete`. Every release also has a full `.zip` fallback archive
+containing the complete signed release directory. The archive is used when no
+safe delta exists, when delta validation fails before activation, or when policy
+decides the full archive is more efficient.
 
 ### 7. Create Release Metadata And Channel Pointer
 
@@ -298,15 +310,22 @@ Example:
   "commit": "<host-app-git-sha>",
   "targetManifestPath": "target-file-manifest.json",
   "targetManifestSha256": "<sha256>",
-  "deltaManifests": [
+  "fullArchive": {
+    "archivePath": "archives/ab/cd/<full-archive-sha256>.zip",
+    "compression": "zip",
+    "sha256": "<sha256>",
+    "size": 1000000
+  },
+  "deltas": [
     {
       "baseBuild": 100,
       "targetBuild": 110,
       "path": "delta-from-100-to-110.json",
-      "sha256": "<sha256>"
+      "sha256": "<sha256>",
+      "size": 25000
     }
   ],
-  "releaseNotesPath": "release/notes/1.1.0+110.md",
+  "changelogMarkdown": "## 1.1.0\n\n- updater: download changed payload files",
   "publishedAtUtc": null
 }
 ```
@@ -354,11 +373,12 @@ windows-updater-release dry-run \
 
 The upload order must be:
 
-1. compressed payload files under `windows/stable/releases/1.1.0+110/payload/`;
-2. `target-file-manifest.json`;
-3. `delta-from-100-to-110.json`;
-4. `release.json`;
-5. `windows/stable/latest.json`.
+1. compressed payload files under `windows/stable/releases/1.1.0+110/payloads/`;
+2. full archive under `windows/stable/releases/1.1.0+110/archives/`;
+3. `target-file-manifest.json`;
+4. `delta-from-100-to-110.json`;
+5. `release.json`;
+6. `windows/stable/latest.json`.
 
 Do not upload or overwrite `latest.json` until every immutable release object is
 present and its SHA-256 hash matches local metadata.
@@ -372,7 +392,8 @@ s3://windows-updates-prod/windows/stable/releases/1.1.0+110/
   release.json
   target-file-manifest.json
   delta-from-100-to-110.json
-  payload/<sha256>.gz
+  payloads/<prefix>/<compressed-payload-sha256>.gz
+  archives/<prefix>/<full-archive-sha256>.zip
 ```
 
 Verify each uploaded object by downloading it back or comparing S3 checksums.
@@ -570,7 +591,9 @@ Outputs:
 
 - `target-file-manifest.json`
 - `delta-from-<base-build>-to-<target-build>.json` when `--base-manifest` is set
-- `payload/<sha256>.gz` for changed files
+- `payloads/<prefix>/<compressed-payload-sha256>.gz` for changed files
+- `archives/<prefix>/<full-archive-sha256>.zip` as the complete signed fallback
+- `release.json`
 
 ## Draft Release Notes
 
@@ -601,9 +624,11 @@ windows-updater-release dry-run \
 The plan orders immutable release objects before the mutable channel pointer:
 
 1. compressed payload objects;
-2. target manifest;
-3. delta manifests;
-4. `latest.json`.
+2. full fallback archive;
+3. target manifest;
+4. delta manifests;
+5. release manifest;
+6. `latest.json`.
 
 Do not publish `latest.json` until every referenced immutable object is present
 and verified.

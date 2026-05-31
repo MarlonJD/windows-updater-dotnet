@@ -10,10 +10,12 @@ internal static class Program
         var tests = new (string Name, Func<Task> Run)[]
         {
             ("manifest signatures reject tampering", ManifestSignaturesRejectTampering),
-            ("release generator emits compressed changed payload metadata", ReleaseGeneratorEmitsCompressedChangedPayloadMetadata),
+            ("release generator emits compressed changed payload metadata and full archive", ReleaseGeneratorEmitsCompressedChangedPayloadMetadata),
+            ("full archive fallback stages through the same verifier", FullArchiveFallbackStagesThroughSameVerifier),
             ("release state allocates SemVer and build numbers", ReleaseStateAllocatesSemVerAndBuildNumbers),
             ("Conventional Commits generate scoped changelog draft", ConventionalCommitsGenerateScopedChangelogDraft),
             ("S3 CloudFront dry run uploads immutable release objects before latest", S3CloudFrontDryRunOrdersObjects),
+            ("update runner rolls back on launch failure", UpdateRunnerRollsBackOnLaunchFailure),
             ("current version state falls back to last known good", CurrentVersionStateFallsBackToLastKnownGood)
         };
 
@@ -84,8 +86,49 @@ internal static class Program
         Assert.NotNull(payload);
         Assert.Equal("gzip", payload!.Compression);
         Assert.True(File.Exists(Path.Combine(fixture.OutputDirectory, payload.PayloadPath)), "Compressed payload should be written.");
+        Assert.True(payload.PayloadPath.StartsWith("payloads/", StringComparison.Ordinal), "Payload objects must use the immutable payloads prefix.");
+        Assert.Contains(payload.CompressedSha256, payload.PayloadPath);
         Assert.Equal(operations["App.exe"].Sha256, payload.UncompressedSha256);
         Assert.True(payload.CompressedSize > 0, "Compressed payload size should be recorded.");
+
+        var archive = await generator.GenerateFullArchiveAsync(fixture.TargetDirectory, fixture.OutputDirectory);
+        Assert.True(File.Exists(Path.Combine(fixture.OutputDirectory, archive.ArchivePath)), "Full archive fallback should be written.");
+        Assert.True(archive.ArchivePath.StartsWith("archives/", StringComparison.Ordinal), "Full archive must be content-addressed under archives.");
+    }
+
+    private static async Task FullArchiveFallbackStagesThroughSameVerifier()
+    {
+        using var fixture = ReleaseFixture.Create();
+        var generator = new ReleaseManifestGenerator();
+        var baseManifest = generator.Generate(fixture.BaseDirectory, Options("1.0.0", 100));
+        var targetManifest = generator.Generate(fixture.TargetDirectory, Options("1.1.0", 110));
+        var delta = await generator.GenerateDeltaAsync(baseManifest, targetManifest, fixture.TargetDirectory, fixture.OutputDirectory);
+        var archive = await generator.GenerateFullArchiveAsync(fixture.TargetDirectory, fixture.OutputDirectory);
+        var verifier = new StagedVersionVerifier(new TrustingFileSignatureVerifier());
+        var stager = new UpdateStager(verifier);
+        var deltaStage = Path.Combine(fixture.Root, "stage-delta");
+        var archiveStage = Path.Combine(fixture.Root, "stage-archive");
+
+        var deltaResult = await stager.StageDeltaAsync(
+            fixture.BaseDirectory,
+            deltaStage,
+            delta,
+            targetManifest,
+            new CompressedFilePayloadSource(fixture.OutputDirectory));
+        var archiveResult = await stager.StageFullArchiveAsync(
+            Path.Combine(fixture.OutputDirectory, archive.ArchivePath),
+            archive,
+            archiveStage,
+            targetManifest);
+
+        Assert.False(deltaResult.UsedFullArchive, "Delta staging should not report archive fallback.");
+        Assert.True(archiveResult.UsedFullArchive, "Archive staging should report archive fallback.");
+        foreach (var file in targetManifest.Files)
+        {
+            Assert.Equal(
+                FileHash.Sha256File(Path.Combine(deltaStage, file.Path)),
+                FileHash.Sha256File(Path.Combine(archiveStage, file.Path)));
+        }
     }
 
     private static Task ReleaseStateAllocatesSemVerAndBuildNumbers()
@@ -132,8 +175,12 @@ internal static class Program
         var baseManifest = generator.Generate(fixture.BaseDirectory, Options("1.0.0", 100));
         var targetManifest = generator.Generate(fixture.TargetDirectory, Options("1.1.0", 110));
         var delta = await generator.GenerateDeltaAsync(baseManifest, targetManifest, fixture.TargetDirectory, fixture.OutputDirectory);
+        var archive = await generator.GenerateFullArchiveAsync(fixture.TargetDirectory, fixture.OutputDirectory);
         await ManifestJson.WriteAsync(Path.Combine(fixture.OutputDirectory, "target-file-manifest.json"), targetManifest);
         await ManifestJson.WriteAsync(Path.Combine(fixture.OutputDirectory, "delta-from-100-to-110.json"), delta);
+        await ManifestJson.WriteAsync(
+            Path.Combine(fixture.OutputDirectory, "release.json"),
+            generator.GenerateReleaseMetadata(targetManifest, archive, [delta], "test-commit"));
 
         var plan = new S3CloudFrontPlanner().Plan(
             new S3CloudFrontPublishOptions(
@@ -150,6 +197,58 @@ internal static class Program
         Assert.False(plan.Objects.Take(plan.Objects.Count - 1).Any(item => item.IsMutable), "Immutable release objects should upload before latest.");
         Assert.True(plan.Objects.Last().IsMutable, "latest.json should be planned last.");
         Assert.Contains("windows/stable/releases/1.1.0+110", plan.Objects.First().S3Key);
+        Assert.True(plan.Objects.Any(item => item.S3Key.Contains("/archives/", StringComparison.Ordinal)), "Full archive must be uploaded before latest.");
+        Assert.False(plan.Objects.Any(item => item.S3Key.Contains("/release/App.exe", StringComparison.Ordinal)), "Dry run must not upload a raw app tree.");
+    }
+
+    private static async Task UpdateRunnerRollsBackOnLaunchFailure()
+    {
+        using var fixture = ReleaseFixture.Create();
+        var generator = new ReleaseManifestGenerator();
+        var keyPair = ManifestSignatureService.CreateKeyPair("request-key");
+        var signer = new ManifestSignatureService();
+        var installRoot = Path.Combine(fixture.Root, "install");
+        var stateStore = new CurrentVersionStore(installRoot);
+        var previous = new CurrentVersionState(
+            "1.0.0",
+            100,
+            fixture.BaseDirectory,
+            "App.exe",
+            "manifest",
+            LastSuccessfulLaunchUtc: DateTimeOffset.UtcNow);
+        var target = new CurrentVersionState(
+            "1.1.0",
+            110,
+            fixture.TargetDirectory,
+            "App.exe",
+            "manifest");
+        var manifest = generator.Generate(fixture.TargetDirectory, Options("1.1.0", 110));
+        var request = signer.Sign(
+            new LocalUpdateRequest(
+                installRoot,
+                AppProcessId: null,
+                fixture.TargetDirectory,
+                target,
+                previous,
+                Path.Combine(installRoot, "WindowsUpdater.Launcher.exe"),
+                Path.Combine(fixture.Root, "missing.marker"),
+                LaunchProbeTimeoutSeconds: 1),
+            keyPair.KeyId,
+            keyPair.PrivateKey);
+        await stateStore.WriteAtomicAsync(previous);
+
+        var runner = new UpdateRunnerCore(
+            stateStore,
+            new Dictionary<string, string> { [keyPair.KeyId] = keyPair.PublicKey },
+            signer,
+            new StagedVersionVerifier(new TrustingFileSignatureVerifier()),
+            null,
+            new RecordingProcessLauncher(),
+            new FixedLaunchProbe(false));
+        var result = await runner.ApplyAsync(request, manifest);
+
+        Assert.Equal(UpdateStatus.RolledBack, result.Status);
+        Assert.Equal(100, (await stateStore.ReadAsync())!.Build);
     }
 
     private static async Task CurrentVersionStateFallsBackToLastKnownGood()
@@ -227,6 +326,8 @@ internal static class Program
         {
             Write(directory, "App.exe", $"app-{version}");
             Write(directory, "Core.dll", "core-stable");
+            Write(directory, "App.deps.json", $"deps-{version}");
+            Write(directory, "App.runtimeconfig.json", $"runtime-{version}");
             Write(directory, "WindowsUpdater.Launcher.exe", $"launcher-{version}");
             Write(directory, "WindowsUpdater.UpdateRunner.exe", $"runner-{version}");
             Write(directory, "Resources/en-us/Resources.resw", $"strings-{version}");
@@ -242,6 +343,46 @@ internal static class Program
             var path = Path.Combine(directory, relativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, content);
+        }
+    }
+
+    private sealed class TrustingFileSignatureVerifier : IFileSignatureVerifier
+    {
+        public Task<FileSignatureVerificationResult> VerifyAsync(
+            string path,
+            string? expectedPublisher,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(FileSignatureVerificationResult.Trusted(expectedPublisher));
+        }
+    }
+
+    private sealed class FixedLaunchProbe : IUpdateLaunchProbe
+    {
+        private readonly bool succeeds;
+
+        public FixedLaunchProbe(bool succeeds)
+        {
+            this.succeeds = succeeds;
+        }
+
+        public Task<bool> WaitForSuccessAsync(
+            string successMarkerPath,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(succeeds);
+        }
+    }
+
+    private sealed class RecordingProcessLauncher : IProcessLauncher
+    {
+        public List<string> Launches { get; } = [];
+
+        public ProcessLaunchResult Launch(string executablePath, string? arguments = null)
+        {
+            Launches.Add(executablePath);
+            return new ProcessLaunchResult(true, 42);
         }
     }
 }

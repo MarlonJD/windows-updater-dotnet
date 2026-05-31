@@ -3,23 +3,25 @@ using WindowsUpdater;
 var arguments = CliArguments.Parse(args);
 if (!arguments.TryGetValue("install-root", out var installRoot)
     || !arguments.TryGetValue("request", out var requestPath)
+    || !arguments.TryGetValue("target-manifest", out var targetManifestPath)
     || !arguments.TryGetValue("public-key-id", out var publicKeyId)
     || !arguments.TryGetValue("public-key", out var publicKey))
 {
-    Console.Error.WriteLine("Usage: WindowsUpdater.UpdateRunner --install-root <path> --request <path> --public-key-id <id> --public-key <base64>");
+    Console.Error.WriteLine("Usage: WindowsUpdater.UpdateRunner --install-root <path> --request <path> --target-manifest <path> --public-key-id <id> --public-key <base64>");
     return 2;
 }
 
 var request = await ManifestJson.ReadAsync<LocalUpdateRequest>(requestPath);
+var targetManifest = await ManifestJson.ReadAsync<ReleaseManifest>(targetManifestPath);
 var runner = new UpdateRunnerCore(
     new CurrentVersionStore(installRoot),
     new Dictionary<string, string> { [publicKeyId] = publicKey });
-var result = await runner.SwitchAsync(request);
+var result = await runner.ApplyAsync(request, targetManifest);
 
-if (result.Status == UpdateStatus.Installed)
+if (result.Status is UpdateStatus.Installed or UpdateStatus.RolledBack)
 {
-    Console.WriteLine("Installed");
-    return 0;
+    Console.WriteLine(result.Status);
+    return result.Status == UpdateStatus.Installed ? 0 : 3;
 }
 
 Console.Error.WriteLine(result.Reason ?? "Update failed.");
