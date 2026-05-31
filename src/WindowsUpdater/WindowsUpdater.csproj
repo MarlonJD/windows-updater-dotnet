@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>MarlonJD.WindowsUpdater</PackageId>
+    <Title>Windows Updater</Title>
+    <Description>Reusable manifest, signature, payload, and immutable version state primitives for a native Windows file-level updater.</Description>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+</Project>

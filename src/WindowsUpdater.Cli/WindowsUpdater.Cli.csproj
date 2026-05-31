@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\WindowsUpdater\WindowsUpdater.csproj" />
+    <ProjectReference Include="..\WindowsUpdater.Release\WindowsUpdater.Release.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PackageId>MarlonJD.WindowsUpdater.Cli</PackageId>
+    <Title>Windows Updater Release CLI</Title>
+    <Description>Local release CLI for generating manifests, deltas, changelog drafts, and S3/CloudFront dry-run plans.</Description>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>windows-updater-release</ToolCommandName>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+</Project>

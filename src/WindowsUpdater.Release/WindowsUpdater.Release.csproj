@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\WindowsUpdater\WindowsUpdater.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <PackageId>MarlonJD.WindowsUpdater.Release</PackageId>
+    <Title>Windows Updater Release Tooling</Title>
+    <Description>Release-side manifest generation, payload compression metadata, changelog drafts, release state, and S3/CloudFront dry-run planning.</Description>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+</Project>
