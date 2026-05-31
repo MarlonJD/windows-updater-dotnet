@@ -41,6 +41,383 @@ dotnet add <host-app>.csproj reference src/WindowsUpdater/WindowsUpdater.csproj
 dotnet add <release-tool>.csproj reference src/WindowsUpdater.Release/WindowsUpdater.Release.csproj
 ```
 
+## End-to-End Release Workflow
+
+This is the full intended release flow from source changes to a published
+update.
+
+### 1. Merge Changes With Conventional Commits
+
+Every user-visible change should reach the release branch with a Conventional
+Commit subject:
+
+```text
+feat(updater): download changed payload files
+fix(runner): restore previous version on launch failure
+perf(release): reduce payload compression time
+security: rotate updater signing key
+docs: update release checklist
+```
+
+The release-note draft includes `feat`, `fix`, `perf`, `security`, and breaking
+changes by default. It excludes `docs`, `test`, `chore`, and non-breaking
+`refactor` commits unless the release owner edits the draft.
+
+Before cutting a release, the host app repository should be clean, on the
+release branch, and up to date with its remote.
+
+### 2. Decide The Next Version
+
+Use SemVer for the user-visible version and a monotonically increasing build
+number for updater ordering:
+
+```text
+releaseId = <semver>+<buildNumber>
+example   = 1.1.0+110
+```
+
+Version bump rules:
+
+- `MAJOR`: incompatible product or updater contract changes.
+- `MINOR`: backward-compatible features.
+- `PATCH`: backward-compatible fixes.
+- prerelease: beta or release-candidate channels, for example `1.2.0-beta.1`.
+
+Clients decide whether a target is newer by comparing build numbers:
+
+```text
+target.build > current.build
+```
+
+Keep the local build-number ledger in the host app or release repository:
+
+```text
+release/windows-updater-release-state.json
+```
+
+Example:
+
+```json
+{
+  "lastBuildNumber": 109,
+  "lastStableVersion": "1.0.0",
+  "lastBetaVersion": "1.1.0-beta.1"
+}
+```
+
+When releasing `1.1.0`, allocate the next build number and commit the updated
+state file with the release change:
+
+```json
+{
+  "lastBuildNumber": 110,
+  "lastStableVersion": "1.1.0",
+  "lastBetaVersion": "1.1.0-beta.1"
+}
+```
+
+This file is the source-controlled record of the latest allocated build number.
+The public update channel still comes from `latest.json`, described below.
+
+### 3. Draft The Changelog From Changes
+
+Collect commit subjects since the previous release tag:
+
+```sh
+git log --format=%s v1.0.0+100..HEAD
+```
+
+Pass the subjects to the release tool as a pipe-separated list:
+
+```sh
+windows-updater-release changelog \
+  --version 1.1.0 \
+  --commits "feat(updater): download changed payload files|fix(runner): restore previous version on launch failure|docs: update checklist"
+```
+
+Review the generated markdown. The release owner should edit it for clarity and
+save the final text in the host app release notes, for example:
+
+```text
+release/notes/1.1.0+110.md
+```
+
+The changelog is user-facing release context. It is not the update channel
+pointer by itself.
+
+### 4. Build The EXE Files
+
+Build the host app as an unpackaged release. The exact host app project name is
+app-specific; this example uses `ExampleApp.Windows.csproj`.
+
+```powershell
+dotnet publish .\src\ExampleApp.Windows\ExampleApp.Windows.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:WindowsPackageType=None `
+  -p:PublishSingleFile=false `
+  -o .\artifacts\1.1.0+110\app
+```
+
+Build the stable launcher and update runner:
+
+```powershell
+dotnet publish .\src\WindowsUpdater.Launcher\WindowsUpdater.Launcher.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:PublishSingleFile=true `
+  -o .\artifacts\1.1.0+110\launcher
+
+dotnet publish .\src\WindowsUpdater.UpdateRunner\WindowsUpdater.UpdateRunner.csproj `
+  -c Release `
+  -r win-x64 `
+  --self-contained true `
+  -p:PublishSingleFile=true `
+  -o .\artifacts\1.1.0+110\runner
+```
+
+Create the signed release directory shape:
+
+```text
+artifacts\
+  1.1.0+110\
+    release\
+      ExampleApp.exe
+      ExampleApp.dll
+      ExampleApp.deps.json
+      ExampleApp.runtimeconfig.json
+      WindowsUpdater.Launcher.exe
+      WindowsUpdater.UpdateRunner.exe
+      Resources\
+    update\
+```
+
+Copy the host app publish output into `release\`, then copy
+`WindowsUpdater.Launcher.exe` and `WindowsUpdater.UpdateRunner.exe` into the
+same directory.
+
+Repeat the publish process for each supported architecture, such as `win-x64`
+and `win-arm64`.
+
+### 5. Sign And Verify The EXE/DLL Files
+
+Sign every PE file after publish and before manifest generation. Do not modify
+signed files after this step.
+
+```powershell
+$release = ".\artifacts\1.1.0+110\release"
+$timestamp = "http://timestamp.digicert.com"
+
+Get-ChildItem $release -Recurse -Include *.exe,*.dll |
+  ForEach-Object {
+    signtool sign /fd SHA256 /td SHA256 /tr $timestamp `
+      /sha1 $env:WINDOWS_CODE_SIGNING_CERT_THUMBPRINT $_.FullName
+  }
+
+Get-ChildItem $release -Recurse -Include *.exe,*.dll |
+  ForEach-Object {
+    signtool verify /pa /tw $_.FullName
+  }
+```
+
+The updater manifest hashes must be generated from the final signed bytes.
+
+### 6. Generate The Target Manifest And Delta
+
+For the first release on a channel, generate only the target file manifest:
+
+```sh
+windows-updater-release generate \
+  --release-dir ./artifacts/1.0.0+100/release \
+  --output-dir ./artifacts/1.0.0+100/update \
+  --product ExampleApp.Windows \
+  --channel stable \
+  --architecture win-x64 \
+  --version 1.0.0 \
+  --build 100 \
+  --publisher "CN=Example Publisher" \
+  --required-files "ExampleApp.exe;ExampleApp.deps.json;ExampleApp.runtimeconfig.json;WindowsUpdater.Launcher.exe;WindowsUpdater.UpdateRunner.exe" \
+  --key-id updater-key-2026 \
+  --private-key "$WINDOWS_UPDATER_PRIVATE_KEY"
+```
+
+For later releases, pass the previous target manifest so changed-file payloads
+and delete operations are generated:
+
+```sh
+windows-updater-release generate \
+  --release-dir ./artifacts/1.1.0+110/release \
+  --output-dir ./artifacts/1.1.0+110/update \
+  --product ExampleApp.Windows \
+  --channel stable \
+  --architecture win-x64 \
+  --version 1.1.0 \
+  --build 110 \
+  --publisher "CN=Example Publisher" \
+  --base-manifest ./artifacts/1.0.0+100/update/target-file-manifest.json \
+  --required-files "ExampleApp.exe;ExampleApp.deps.json;ExampleApp.runtimeconfig.json;WindowsUpdater.Launcher.exe;WindowsUpdater.UpdateRunner.exe" \
+  --key-id updater-key-2026 \
+  --private-key "$WINDOWS_UPDATER_PRIVATE_KEY"
+```
+
+The update directory contains:
+
+```text
+artifacts/1.1.0+110/update/
+  target-file-manifest.json
+  delta-from-100-to-110.json
+  payload/
+    <changed-file-sha256>.gz
+```
+
+Only files with changed hashes become `downloadFile` payloads. Unchanged files
+are represented as `copyFromBase`, and files removed from the target release are
+represented as `delete`.
+
+### 7. Create Release Metadata And Channel Pointer
+
+The host release process should write a release metadata file next to the
+manifest output:
+
+```text
+artifacts/1.1.0+110/update/release.json
+```
+
+Example:
+
+```json
+{
+  "product": "ExampleApp.Windows",
+  "channel": "stable",
+  "architecture": "win-x64",
+  "version": "1.1.0",
+  "build": 110,
+  "releaseId": "1.1.0+110",
+  "commit": "<host-app-git-sha>",
+  "targetManifestPath": "target-file-manifest.json",
+  "targetManifestSha256": "<sha256>",
+  "deltaManifests": [
+    {
+      "baseBuild": 100,
+      "targetBuild": 110,
+      "path": "delta-from-100-to-110.json",
+      "sha256": "<sha256>"
+    }
+  ],
+  "releaseNotesPath": "release/notes/1.1.0+110.md",
+  "publishedAtUtc": null
+}
+```
+
+The public channel pointer is:
+
+```text
+windows/<channel>/latest.json
+```
+
+Example `latest.json`:
+
+```json
+{
+  "product": "ExampleApp.Windows",
+  "channel": "stable",
+  "architecture": "win-x64",
+  "version": "1.1.0",
+  "build": 110,
+  "releaseId": "1.1.0+110",
+  "releaseManifestUrl": "https://updates.example.com/windows/stable/releases/1.1.0+110/release.json",
+  "targetManifestUrl": "https://updates.example.com/windows/stable/releases/1.1.0+110/target-file-manifest.json",
+  "minimumSupportedBuild": 100,
+  "mandatory": false,
+  "publishedAtUtc": "2026-05-31T19:00:00Z"
+}
+```
+
+This file answers "which version is currently published?" for clients. The
+source-controlled release state answers "which build number was allocated
+last?" and the git tag answers "which source commit produced this release?"
+
+### 8. Dry-Run The Upload Order
+
+Create a dry-run plan before uploading release objects:
+
+```sh
+windows-updater-release dry-run \
+  --manifest ./artifacts/1.1.0+110/update/target-file-manifest.json \
+  --bucket windows-updates-prod \
+  --cloudfront https://updates.example.com \
+  --platform windows \
+  --channel stable
+```
+
+The upload order must be:
+
+1. compressed payload files under `windows/stable/releases/1.1.0+110/payload/`;
+2. `target-file-manifest.json`;
+3. `delta-from-100-to-110.json`;
+4. `release.json`;
+5. `windows/stable/latest.json`.
+
+Do not upload or overwrite `latest.json` until every immutable release object is
+present and its SHA-256 hash matches local metadata.
+
+### 9. Upload And Publish
+
+Upload immutable objects first:
+
+```text
+s3://windows-updates-prod/windows/stable/releases/1.1.0+110/
+  release.json
+  target-file-manifest.json
+  delta-from-100-to-110.json
+  payload/<sha256>.gz
+```
+
+Verify each uploaded object by downloading it back or comparing S3 checksums.
+
+Publish the release by uploading the mutable channel pointer last:
+
+```text
+s3://windows-updates-prod/windows/stable/latest.json
+```
+
+If upload fails before `latest.json`, clients should not see the new release.
+If `latest.json` is wrong, fix it by pointing back to the previous known-good
+release or by publishing a corrected signed channel pointer.
+
+### 10. Tag, Record, And Monitor
+
+After publishing:
+
+```sh
+git tag v1.1.0+110
+git push origin v1.1.0+110
+```
+
+Record release evidence in the host app repository:
+
+```text
+release/evidence/1.1.0+110.md
+```
+
+Include:
+
+- release id, version, build, channel, architecture, and git SHA;
+- package paths and SHA-256 hashes;
+- signing certificate subject and thumbprint;
+- target manifest hash;
+- delta manifest hashes;
+- `latest.json` URL and hash;
+- smoke test result;
+- rollback test result;
+- release owner approval.
+
+Monitor update checks, changed bytes downloaded, staged versions, successful
+launch markers, failures, and rollbacks. Keep the previous version directory
+available until the new release has passed its retention window.
+
 ## Release Layout
 
 The host application should install into a per-user root with immutable version
